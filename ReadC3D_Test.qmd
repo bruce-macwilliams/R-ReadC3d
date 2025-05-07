@@ -1,0 +1,566 @@
+---
+title: "Test Read C3D"
+author: "Bruce MacWilliams"
+format:
+  html: 
+    self-contained: true
+    code-fold: true
+    code-overflow: scroll
+    code-summary: "Show the code"
+params: 
+  FileName: NA
+editor: source
+---
+
+```{r initialize}
+#| echo: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(RColorBrewer)
+library(gt)
+library(ggpubr)
+theme_set(theme_minimal())
+
+C3DFileName <- params$FileName
+
+source("ReadC3D.R")
+source("ReadC3DParameters.R")
+
+C3D <- ReadC3D(C3DFileName = C3DFileName, MarkerDataFormat = 'wide')
+
+# Write RDS
+saveRDS(C3D, file = paste0(C3DFileName, '.RDS'))
+
+# First, use what data is present to control which plots are made
+VideoPlots <- ForcePlatePlots <- AnalogPlots <- Header <- Parameters <- FALSE
+GaitEvents <- TRUE
+
+C3D_Names <- names(C3D)
+
+# Is there any header data
+
+if ("Header" %in% C3D_Names) {
+  if(!is.null(C3D$Header) && length(C3D$Header) > 0) {
+    Header <- TRUE
+  }
+}
+
+if ("Parameters" %in% C3D_Names) {
+  if(!is.null(C3D$Parameters) && length(C3D$Parameters) > 0) {
+    Parameters <- TRUE
+  }
+}
+
+if ("VideoData" %in% C3D_Names) {
+  Video_Names <- names(C3D$VideoData)
+  VideoPlots <- TRUE
+}
+
+if ("ForcePlateData" %in% C3D_Names && VideoPlots) {
+  FP_Names <- names(C3D$ForcePlateData)
+  # Only plot force plate data if there are moments otherwise random forces
+  if ('LAnkleMoment_X' %in% names(Video_Names) | 'RAnkleMoment_X' %in% names(Video_Names)) {
+    ForcePlatePlots <- TRUE
+  }
+}
+
+if ("AnalogData" %in% C3D_Names) {AnalogPlots <- TRUE}
+
+# Can only make video and forceplate plots if there are gait cycle events
+if (is.null(C3D$GaitCycleEvents) || 
+       length(C3D$GaitCycleEvents) == 0 || 
+       C3D$GaitCycleEvents[1] == "No Gait Cycle Events from EVENT:USED") {
+  VideoPlots <- FALSE
+  ForcePlatePlots <- FALSE
+  GaitEvents <- LeftGaitEvents <- RightGaitEvents <- FALSE
+}
+
+```
+
+## Header
+
+```{r, eval = Header}
+#| label: header table
+#| echo: false
+#| warning: false
+#| message: false
+
+# Convert the list to a data frame
+c3d_data <- data.frame(
+  Parameter = names(C3D$Header),
+  Value = unlist(C3D$Header),
+  stringsAsFactors = FALSE
+)
+
+c3d_data |>
+  gt() %>%
+  tab_header(
+    title = "C3D Header Information"
+  ) %>%
+  cols_label(
+    Parameter = "Parameter",
+    Value = "Value"
+  ) %>%
+  tab_spanner(
+    label = "C3D Data",
+    columns = vars(Parameter, Value)
+  ) %>%
+  tab_spanner_delim(delim = ":")
+
+```
+
+## Parameters
+
+```{r, eval = Parameters}
+#| label: parameter table
+#| echo: false
+#| warning: false
+#| message: false
+
+P <- C3D$Parameters
+# Table of selected parameters
+SubName <- GetParameterData(P, 'SUBJECTS', 'NAMES')
+MkrName <- GetParameterData(P, 'SUBJECTS', 'MARKER_SETS')
+TrialStart <- GetParameterData(P, 'TRIAL', 'ACTUAL_START_FIELD')
+TrialEnd <- GetParameterData(P, 'TRIAL', 'ACTUAL_END_FIELD')
+TrialRate <- GetParameterData(P, 'TRIAL', 'CAMERA_RATE')
+NumLabels <- GetParameterData(P, 'POINT', 'USED')
+ManCo <- GetParameterData(P, 'MANUFACTURER', 'COMPANY')
+ManSoft <- GetParameterData(P, 'MANUFACTURER', 'SOFTWARE')
+ManSoftVer <- GetParameterData(P, 'MANUFACTURER', 'VERSION_LABEL')
+# Analog parameters
+Analog_Labels <- GetParameterData(P, 'ANALOG', 'LABELS')
+Analog_Offset <- GetParameterData(P, 'ANALOG', 'OFFSET')
+Analog_Format <- GetParameterData(P, 'ANALOG', 'FORMAT')
+Analog_Rate  <- GetParameterData(P, 'ANALOG', 'RATE')
+Video_Rate <- GetParameterData(P, 'TRIAL', 'CAMERA_RATE')
+if (is.na(Video_Rate)) {
+  Video_Rate <- GetParameterData(P, 'POINT', 'RATE')
+}
+if (is.na(Video_Rate) & !is.na(C3D$Header$Video_Sampling_Rate)) {
+  Video_Rate <- C3D$Header$Video_Sampling_Rate
+}
+Analog_Scale <- GetParameterData(P, 'ANALOG', 'SCALE')
+Analog_General_Scale <- GetParameterData(P, 'ANALOG', 'GEN_SCALE')
+
+if (is.na(Analog_Rate)) {Analog_Rate <- Video_Rate}
+AV_Mult <- Analog_Rate/Video_Rate
+
+# Combine the manufacturer information into one string
+Manufacturer <- paste(ManCo, ManSoft, ManSoftVer, sep = " - ")
+TrialStart <- as.integer(TrialStart[2]) * 2^8 + as.integer(TrialStart[1])
+TrialEnd <- as.integer(TrialEnd[2]) * 2^8 + as.integer(TrialEnd[1])
+
+# Create a data frame with the parameters
+data <- tibble(
+  Parameter = c("Subject Name", "Marker Set", "Trial Start", "Trial End", 
+                "Trial Rate", "Number of Labels", "Manufacturer"),
+  Value = c(SubName, MkrName, TrialStart, TrialEnd, TrialRate, NumLabels, Manufacturer)
+)
+
+# Create the table using gt
+data %>%
+  gt() %>%
+  tab_header(
+    title = "Trial and Manufacturer Information"
+  ) %>%
+  cols_label(
+    Parameter = "Parameter",
+    Value = "Value"
+  )
+
+
+# Create Analog Parameter Table
+# Create a data frame with the parameters
+data <- tibble(
+  Parameter = c("Video Rate", "Analog Rate", "Analog General Scale", 
+                "Analog Labels", "Analog Offset", "Analog Scale"),
+  Value = c(Video_Rate, Analog_Rate, Analog_General_Scale,
+            list(Analog_Labels), list(Analog_Offset), list(Analog_Scale))
+  )
+
+data %>%
+  gt() %>%
+  tab_header(
+    title = "Analog Parameters"
+  ) %>%
+  cols_label(
+    Parameter = "Parameter",
+    Value = "Value"
+  )
+```
+
+## Gait Events
+
+```{r, eval = GaitEvents}
+#| label: gait events
+#| echo: false
+#| warning: false
+#| message: false
+
+# Function to check all possibilities
+# Need at least two non-zero, non-na, foot strikes
+Good2 <- function(event) {
+  sum(is.finite(event) & event != 0, na.rm = TRUE) >= 2
+}
+Good1 <- function(event) {
+  sum(is.finite(event) & event != 0, na.rm = TRUE) >= 1
+}
+
+levents <- NULL
+revents <- NULL
+  
+# Further checking of gait events and table
+if (GaitEvents) {
+  # Are there two valid left strike frames?
+  if (Good2(C3D$GaitCycleEvents$FootStrikeFrame_L)) {
+    LIC <- C3D$GaitCycleEvents$FootStrikeFrame_L[1]
+    LFC <- C3D$GaitCycleEvents$FootStrikeFrame_L[2]
+    LeftGaitEvents <- TRUE
+  }
+  # Is there at least one left foot off?
+  if (Good1(C3D$GaitCycleEvents$FootOffFrame_L)) {
+    idx <- which(between(C3D$GaitCycleEvents$FootOffFrame_L, LIC, LFC))
+    if(length(idx == 0)) {
+      LFO <- NA
+      } else {
+        LFO <- C3D$GaitCycleEvents$FootOffFrame_L[idx]
+      }
+    }
+  # Store events even if there is no foot off
+  if (LeftGaitEvents) {
+    levents <- list(LIC = LIC, LFO = LFO, LFC = LFC)
+  }
+  # Are there two valid right strike frames?
+  if (Good2(C3D$GaitCycleEvents$FootStrikeFrame_R)) {
+    RIC <- C3D$GaitCycleEvents$FootStrikeFrame_R[1]
+    RFC <- C3D$GaitCycleEvents$FootStrikeFrame_R[2]
+    RightGaitEvents <- TRUE
+    }
+  # Is there at least one right foot off?
+  if (Good1(C3D$GaitCycleEvents$FootOffFrame_L)) {
+    idx <- which(between(C3D$GaitCycleEvents$FootOffFrame_R, RIC, RFC))
+    if(length(idx) == 0) {
+      RFO <- NA
+      } else {
+        RFO <- C3D$GaitCycleEvents$FootOffFrame_R[idx]
+      }
+    }
+  # Store events even if there is no foot off
+  if (RightGaitEvents) {
+    revents <- list(RIC = RIC, RFO = RFO, RFC = RFC)
+  }
+}
+
+# IF neither Left nor Right qualify then no gait events
+if (!LeftGaitEvents & !RightGaitEvents) {GaitEvents <- FALSE}
+
+levents <- as.numeric(levents)
+revents <- as.numeric(revents)
+
+if (GaitEvents) {
+  # Make a tibble to make table
+  data <- tibble(
+    Event = c("Initial Contact", "Foot Off", "Final Contact"),
+    Left = c(levents[1], levents[2], levents[3]),
+    Right = c(revents[1], revents[2], revents[3])
+    )
+  
+  data %>%
+    gt() %>%
+    tab_header(
+      title = "Gait Events"
+    ) %>%
+    cols_label(
+      Event = "Event",
+      Left = "Left",
+      Right = "Right"
+    )
+}
+
+```
+
+
+```{r functions}
+#| echo: false
+#| warning: false
+#| message: false
+
+# Set colors
+Col_L <- brewer.pal(3, "Set1")[2]   # "#377EB8" Blue for Left
+Col_R <- brewer.pal(3, "Set1")[1]   # "#E41A1C" Red for Right
+
+#### Plot Data Function
+# This function creates dataframe and plots a kinematic or kinetic variable
+# AV = c("Video"/"V", "Analog"/"A", "Forceplate"/"FP") data from C3D, lname/rname names of variables
+# For forceplate data pass same name e.g. Fx, Fy, Fz for left/right
+# String array for forceplate names
+forceplate <- c('ForcePlate1', 'ForcePlate2', 'ForcePlate3', 
+                'ForcePlate4', 'ForcePlate5' ,'ForcePlate6')
+
+percent <- seq(0, 100, length.out = 101)
+
+C3D_LR_Plot <- function(C3D, datatype, lname, rname, lfp = NA, rfp = NA) {
+  if (GaitEvents) {
+    # Events
+    # For passing to plot, use centiles
+    if (LeftGaitEvents & !is.na(levents[2])) {
+      LFO = 100*(levents[2]-levents[1])/(levents[3]-levents[1])
+    } else {
+      LFO = 0
+    }
+    if (RightGaitEvents & !is.na(revents[2])) {
+      RFO = 100*(revents[2]-revents[1])/(revents[3]-levents[1])
+    } else {
+      RFO = 0
+    }
+    events <- list(LFO = LFO, RFO = RFO)
+  }
+  # Create long tibble with Frames, Side, and data value
+  
+  # Analog Data
+  # For analog data show all frames, do not filter
+  # Make continuous video frames with decimals from subframes
+  if(datatype %in% c('A', 'Analog')) {
+    # Get channel number
+    LChannel <- which(lname == Analog_Labels)
+    RChannel <- which(rname == Analog_Labels)
+    dfl <- tibble(
+      sframe = C3D$AnalogData$SubFrames,
+      frame = C3D$AnalogData$VideoFrames + (sframe-1)/AV_Mult,
+      data = C3D$AnalogData[[lname]],
+      side = 'Left')
+    dfr <- tibble(
+      sframe = C3D$AnalogData$SubFrames,
+      frame = C3D$AnalogData$VideoFrames + (sframe-1)/AV_Mult,
+      data = C3D$AnalogData[[rname]],
+      side = 'Right')
+    df <- bind_rows(dfl, dfr) |> select(-sframe)
+    # Do not use percent gait for events
+    if (GaitEvents) {
+      events <- list(LFO = levents[2], RFO = revents[2])
+      events[is.na(events)] <- 0
+    } else {
+      events <- list(LFO = 0, RFO = 0)
+    }
+    # Create plot and stop here
+    return(LR_AnyPlot(df, events, datatype, lname, rname))
+
+  # Forceplate Data
+  } else if (datatype %in% c('FP', 'Forceplate')) {
+    # use index to get forcplate name
+    lfp_name <- forceplate[lfp]
+    rfp_name <- forceplate[rfp]
+    if (LeftGaitEvents) {
+      dfl <- data.frame(
+        #aframe = C3D$AnalogData$AnalogFrames,
+        frame = C3D$ForcePlateData[[lfp_name]][['VideoFrames']],
+        data = C3D$ForcePlateData[[lfp_name]][[lname]]
+      ) |> filter(between(frame, levents[1], levents[3]))
+    }
+    if (RightGaitEvents) {
+      dfr <- tibble(
+        #aframe = C3D$orcePlateData[[rfp_name]][['AnalogFrames']],
+        frame = C3D$ForcePlateData[[rfp_name]][['VideoFrames']],
+        data = C3D$ForcePlateData[[rfp_name]][[rname]]
+      ) |> filter(between(frame, revents[1], revents[3]))
+    }
+    
+  # Video Data
+  } else {
+    if (LeftGaitEvents) {
+      dfl <- tibble(
+        frame = C3D$VideoData$Frame,
+        data = C3D$VideoData[[lname]]
+      ) |> filter(between(frame, levents[1], levents[3]))
+    }
+    if (RightGaitEvents) {
+      dfr <- tibble(
+        frame = C3D$VideoData$Frame,
+        data = C3D$VideoData[[rname]]
+      ) |> filter(between(frame,  revents[1],  revents[3]))
+    }
+  }
+  
+  # Now normalize to 101 points
+  lspline <- spline(seq(1, nrow(dfl)), dfl$data, n = 101)
+  rspline <- spline(seq(1, nrow(dfr)), dfr$data, n = 101)
+  # Combine into long by side dataframe
+  df <- bind_rows(
+    tibble(
+      frame = percent,
+      data = lspline$y,
+      side = 'Left'
+    ),
+    tibble(
+      frame = percent,
+      data = rspline$y,
+      side = 'Right'
+    )
+  )
+  # Create plot
+  return(LR_AnyPlot(df, events, datatype, lname, rname))
+}
+
+# Plot function called from C3D_LR_Plot
+LR_AnyPlot <- function(DFT, events, datatype, lname, rname) {
+  p <-
+    ggplot(DFT, aes(x = frame, fill = side, col = side)) +
+      # 0 intercept line
+      geom_hline(yintercept = 0, size = 0.5) +
+      # Means
+      geom_line(aes(y = data), size = 1) +
+      # Foot Offs
+      geom_vline(xintercept = events$LFO, col = Col_L, size = 0.75) +
+      geom_vline(xintercept = events$RFO, col = Col_R, size = 0.75) +
+      ggtitle(paste(lname, rname)) +
+      # Colors corresponding to Side factor order
+      scale_color_manual(values=c(Col_L, Col_R)) +
+      scale_fill_manual(values=c(Col_L, Col_R)) + 
+      # Remove minor y ticks
+      theme(panel.grid.minor.y = element_blank()) +
+      # Control axis text 
+      theme(axis.text=element_text(size=7), axis.title=element_text(size=8, face='plain')) +
+      theme(plot.title = element_text(size = 10, face = "plain")) +
+      #theme(plot.subtitle = element_text(size = 10, face = "plain")) +
+     # Remove the factor label (Side) from the legend
+      theme(legend.title=element_blank())
+ 
+    return(p)
+}
+
+```
+
+## Video Plots
+
+```{r, eval = VideoPlots}
+#| label: video plots
+#| echo: false
+#| warning: false
+#| message: false
+#| include: true
+
+# New approach, use create_gait_plot function 
+# create plots of all three types of data if included
+# Try to make kinematic data plot, but if kinematics aren't present then pick random name from video
+
+#Video_Names <- names(C3D$VideoData)
+Plot_Names <- c(
+  'LHipAngles_X', 'LHipAngles_Y', 'LHipAngles_Z',
+  'LKneeAngles_X', 'LKneeAngles_Y', 'LKneeAngles_Z',
+  'LAnkleAngles_X', 'LAnkleAngles_Y', 'LAnkleAngles_Z')
+
+if (all(Plot_Names %in% Video_Names)) {
+  # Video Data: Kinematics
+  # hip, knee, ankle
+  HipFlex <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LHipAngles_X', rname = 'RHipAngles_X')
+  HipAbd <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LHipAngles_Y', rname = 'RHipAngles_Y')
+  HipRot <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LHipAngles_Z', rname = 'RHipAngles_Z')
+  KneeFlex <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LKneeAngles_X', rname = 'RKneeAngles_X')
+  KneeAbd <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LKneeAngles_Y', rname = 'RKneeAngles_Y')
+  KneeRot <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LKneeAngles_Z', rname = 'RKneeAngles_Z')
+  AnkFlex <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LAnkleAngles_X', rname = 'RAnkleAngles_X')
+  AnkAbd <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LAnkleAngles_Y', rname = 'RAnkleAngles_Y')
+  AnkRot <- C3D_LR_Plot(C3D, datatype = 'Video', lname = 'LAnkleAngles_Z', rname = 'RAnkleAngles_Z')
+  
+  P <- ggarrange(HipFlex, HipAbd, HipRot, 
+            KneeFlex, KneeAbd, KneeRot,
+            AnkFlex, AnkAbd, AnkRot,
+            nrow = 3, ncol = 3, 
+            common.legend = TRUE)
+  annotate_figure(P, top = text_grob('Video Data: Kinematics', size = 14, face = "bold"))
+  
+} else {
+  # If the kinematics aren't present randomly pick 4 elements and create 2 plots
+  cat('No kinematics')
+  VN <- sample(Video_Names, 4)
+  P1 <- C3D_LR_Plot(C3D, datatype = 'Video', lname = VN[1], rname = VN[2])
+  P2 <- C3D_LR_Plot(C3D, datatype = 'Video', lname = VN[3], rname = VN[4])
+  P <- ggarrange(P1, P2, nrow = 2, common.legend = TRUE)
+  annotate_figure(P, top = text_grob('Video Data: Random', size = 14, face = "bold"))
+}
+
+```
+
+## Forceplate Plots
+
+```{r, eval=ForcePlatePlots}
+#| label: force plate plots
+#| echo: false
+#| warning: false
+#| message: false
+#| include: true
+
+#FP_Names <- names(C3D$ForcePlateData)
+Plot_Names <- c(
+  'Fx', 'Fy', 'Fz', 'CoPx', 'CoPy', 'Tz')
+
+if (all(Plot_Names %in% FP_Names)) {
+
+  # Forceplate Data
+  # Find max Fz over forceplates used and just use that one plate
+  # Find the fp with the largest fz value
+  FP_MaxZL <- which.min(sapply(C3D$ForcePlateData, function(fp) {
+    # Filter to GC range
+    Fz <- fp$Fz[fp$VideoFrames >= LIC & fp$VideoFrames <= LFC]
+    if (length(Fz) > 0) {
+      min(Fz)
+    } else {
+      NA  # If no frames are within the range, return NA
+    }
+  }))
+  
+  FP_MaxZR <- which.min(sapply(C3D$ForcePlateData, function(fp) {
+    # Filter to GC range
+    Fz <- fp$Fz[fp$VideoFrames >= RIC & fp$VideoFrames <= RFC]
+    if (length(Fz) > 0) {
+      min(Fz)
+    } else {
+      NA  # If no frames are within the range, return NA
+    }
+  }))
+  
+  Fx <- C3D_LR_Plot(C3D, datatype = 'FP', lname = 'Fx', rname = 'Fx', lfp = FP_MaxZL, rfp = FP_MaxZR)
+  Fy <- C3D_LR_Plot(C3D, datatype = 'FP', lname = 'Fy', rname = 'Fy', lfp = FP_MaxZL, rfp = FP_MaxZR)
+  Fz <- C3D_LR_Plot(C3D, datatype = 'FP', lname = 'Fz', rname = 'Fz', lfp = FP_MaxZL, rfp = FP_MaxZR)
+  CoPx <- C3D_LR_Plot(C3D, datatype = 'FP', lname = 'CoPx', rname = 'CoPx', lfp = FP_MaxZL, rfp = FP_MaxZR)
+  CoPy <- C3D_LR_Plot(C3D, datatype = 'FP', lname = 'CoPy', rname = 'CoPy', lfp = FP_MaxZL, rfp = FP_MaxZR)
+  Tz <- C3D_LR_Plot(C3D, datatype = 'FP', lname = 'Tz', rname = 'Tz', lfp = FP_MaxZL, rfp = FP_MaxZR)
+  
+  ggarrange(Fx, Fy, Fz, CoPx, CoPy, Tz,
+            nrow = 3, ncol = 3, 
+            common.legend = TRUE)
+}
+
+```
+
+## Analog Plots
+
+```{r, eval=AnalogPlots}
+#| label: analog plots
+#| echo: false
+#| warning: false
+#| message: false
+#| include: true
+
+# Inconsistencies with analog labeling as it is tied to system 
+# setup not a model, so just use a few random entries
+# Only plot left since mixed types may not scale
+
+#C3D_LR_Plot(C3D, datatype = 'A', lname = 'FZ1', rname = 'FZ2')
+Analog_Names <- names(C3D$AnalogData) 
+# Remove counters
+Analog_Names <- Analog_Names[!Analog_Names %in% c('AnalogFrames', 'VideoFrames', 'SubFrames')]
+  
+VN <- sample(Analog_Names, 4)
+P1 <- C3D_LR_Plot(C3D, datatype = 'A', lname = VN[1], rname = NA)
+P2 <- C3D_LR_Plot(C3D, datatype = 'A', lname = VN[2], rname = NA)
+P3 <- C3D_LR_Plot(C3D, datatype = 'A', lname = VN[3], rname = NA)
+P4 <- C3D_LR_Plot(C3D, datatype = 'A', lname = VN[4], rname = NA)
+
+P <- ggarrange(P1, P2, P3, P4, nrow = 2, ncol = 2, common.legend = TRUE)
+annotate_figure(P, top = text_grob('Analog Data: Random', size = 14, face = "bold"))
+
+```
